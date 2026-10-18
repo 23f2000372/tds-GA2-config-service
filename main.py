@@ -1,15 +1,16 @@
+
 import os
 from pathlib import Path
-from typing import Any
 
 import yaml
 from dotenv import dotenv_values
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 
+
 BASE_DIR = Path(__file__).resolve().parent
 
-DEFAULTS: dict[str, Any] = {
+DEFAULTS = {
     "port": 8000,
     "workers": 1,
     "debug": False,
@@ -17,79 +18,111 @@ DEFAULTS: dict[str, Any] = {
     "api_key": "default-secret-000",
 }
 
-TYPE_RULES = {
-    "port": "int",
-    "workers": "int",
-    "debug": "bool",
-}
+ALLOWED_KEYS = set(DEFAULTS.keys())
 
-def coerce(key: str, value: Any) -> Any:
+
+def coerce(key, value):
+    """Convert configuration values to their required types."""
+
     if key in ("port", "workers"):
         return int(value)
+
     if key == "debug":
         if isinstance(value, bool):
             return value
-        return str(value).strip().lower() in {"true", "1", "yes", "on"}
+
+        return str(value).strip().lower() in {
+            "true", "1", "yes", "on"
+        }
+
     return str(value)
 
-def normalize_layer(layer: dict[str, Any]) -> dict[str, Any]:
+
+def normalize_layer(layer):
+    """Normalize keys and convert values for one config layer."""
+
     normalized = {}
+
     for raw_key, value in layer.items():
+        if value is None:
+            continue
+
         key = str(raw_key).strip().lower()
+
         if key.startswith("app_"):
             key = key[4:]
+
         if key == "num_workers":
             key = "workers"
+
+        # Ignore keys outside the five required settings.
+        if key not in ALLOWED_KEYS:
+            continue
+
         normalized[key] = coerce(key, value)
+
     return normalized
 
-def read_effective_config(cli_sets: list[str]) -> dict[str, Any]:
-    # 1. Hardcoded defaults (lowest precedence)
-    config = dict(DEFAULTS)
+
+def read_effective_config(cli_sets):
+    """Merge config layers in increasing priority order."""
+
+    # 1. Hardcoded defaults
+    config = DEFAULTS.copy()
 
     # 2. Environment-specific YAML
     environment = os.getenv("APP_ENV", "development")
     yaml_path = BASE_DIR / f"config.{environment}.yaml"
-    if yaml_path.exists():
+
+    if yaml_path.is_file():
         with yaml_path.open("r", encoding="utf-8") as file:
             yaml_layer = yaml.safe_load(file) or {}
-        config.update(normalize_layer(yaml_layer))
 
-    # 3. .env layer (read separately so OS values remain higher precedence)
+        if isinstance(yaml_layer, dict):
+            config.update(normalize_layer(yaml_layer))
+
+    # 3. .env file
     env_path = BASE_DIR / ".env"
-    dotenv_layer = dotenv_values(env_path) if env_path.exists() else {}
-    config.update(normalize_layer({k: v for k, v in dotenv_layer.items() if v is not None}))
 
-    # 4. OS-level APP_* variables, which override .env
+    if env_path.is_file():
+        dotenv_layer = dotenv_values(env_path)
+        config.update(normalize_layer(dotenv_layer))
+
+    # 4. OS-level APP_* environment variables
     os_layer = {
         key: value
         for key, value in os.environ.items()
         if key.startswith("APP_")
     }
     config.update(normalize_layer(os_layer))
-    if os.getenv("PORT"):
-        config["port"] = int(os.getenv("PORT"))
 
-    # 5. CLI query overrides; repeat ?set=key=value as needed
-    for item in cli_sets:
+    # 5. CLI query overrides (highest priority)
+    for item in cli_sets or []:
         if "=" not in item:
             continue
+
         key, value = item.split("=", 1)
         key = key.strip().lower()
+
         if key.startswith("app_"):
             key = key[4:]
+
         if key == "num_workers":
             key = "workers"
-        if key:
-            config[key] = coerce(key, value)
 
-    # Always mask secrets, regardless of the actual value or source.
+        if key not in ALLOWED_KEYS:
+            continue
+
+        config[key] = coerce(key, value)
+
+    # Never reveal the actual API key.
     config["api_key"] = "****"
+
     return config
 
-app = FastAPI(title="TDS Effective Configuration API")
 
-# Allow the assignment page to call the service from a browser.
+app = FastAPI(title="Layered Configuration Service")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -98,10 +131,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.get("/")
-def root():
-    return {"status": "ok", "endpoint": "/effective-config"}
+def health_check():
+    return {"status": "ok"}
+
 
 @app.get("/effective-config")
-def effective_config(set: list[str] = Query(default=[])):
+def effective_config(
+    set: list[str] | None = Query(default=None),
+):
     return read_effective_config(set)
