@@ -1,0 +1,1 @@
+# tds-GA2-config-service
