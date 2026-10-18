@@ -68,7 +68,7 @@ def read_effective_config(cli_sets: list[str]) -> dict[str, Any]:
     }
     config.update(normalize_layer(os_layer))
     if os.getenv("PORT"):
-    config["port"] = int(os.getenv("PORT"))
+        config["port"] = int(os.getenv("PORT"))
 
     # 5. CLI query overrides; repeat ?set=key=value as needed
     for item in cli_sets:
